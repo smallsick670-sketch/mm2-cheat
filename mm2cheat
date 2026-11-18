@@ -1,0 +1,181 @@
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local Humanoid = Character:WaitForChild("Humanoid")
+
+-- State tracking variables
+local currentTargetPart = nil
+local activeHighlight = nil
+local wasTargetActive = false
+local hasTeleportedToCurrent = false
+local teleportStartTime = nil
+
+-- Ensure character updates if respawned
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
+    Humanoid = newChar:WaitForChild("Humanoid")
+    currentTargetPart = nil
+    hasTeleportedToCurrent = false
+    teleportStartTime = nil
+    if activeHighlight then
+        activeHighlight:Destroy()
+        activeHighlight = nil
+    end
+    wasTargetActive = false
+end)
+
+-- Enable Noclip
+local function enableNoclip()
+    if not Character then return end
+    for _, part in ipairs(Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = false
+        end
+    end
+end
+
+-- Restore normal collisions
+local function disableNoclip()
+    if not Character then return end
+    for _, part in ipairs(Character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if part.Name ~= "HumanoidRootPart" then
+                part.CanCollide = true
+            end
+        end
+    end
+end
+
+-- Find the closest Part or MeshPart inside Workspace -> Model -> CoinContainer (ignoring fully transparent parts)
+local function getClosestCoinPart()
+    local closestPart = nil
+    local shortestDistance = math.huge
+    local currentPos = HumanoidRootPart.Position
+
+    -- Iterate through workspace to find the target structure
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if obj:IsA("Model") then
+            local coinContainer = obj:FindFirstChild("CoinContainer")
+            if coinContainer and coinContainer:IsA("Model") then
+                -- Search inside CoinContainer for parts or meshparts
+                for _, descendant in ipairs(coinContainer:GetDescendants()) do
+                    -- Check if it's a BasePart and is NOT fully transparent (Transparency < 1)
+                    if descendant:IsA("BasePart") and descendant.Transparency < 1 then
+                        local distance = (descendant.Position - currentPos).Magnitude
+                        if distance < shortestDistance then
+                            shortestDistance = distance
+                            closestPart = descendant
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closestPart
+end
+
+-- Main Loop running every frame
+RunService.RenderStepped:Connect(function()
+    if not Character or not HumanoidRootPart or not Humanoid or Humanoid.Health <= 0 then return end
+
+    -- 1. Check if our current target coin is collected, destroyed, or became transparent/invisible
+    if currentTargetPart and (not currentTargetPart.Parent or currentTargetPart.Transparency >= 1) then
+        if activeHighlight then
+            activeHighlight:Destroy()
+            activeHighlight = nil
+        end
+        currentTargetPart = nil
+        hasTeleportedToCurrent = false
+        teleportStartTime = nil
+    end
+
+    -- 2. Instantaneous dynamic scanning for the closest visible coin within 700 studs every frame
+    local bestTarget = getClosestCoinPart()
+    if bestTarget and (bestTarget.Position - HumanoidRootPart.Position).Magnitude <= 700 then
+        if bestTarget ~= currentTargetPart and not hasTeleportedToCurrent then
+            currentTargetPart = bestTarget
+            teleportStartTime = nil -- Reset timer for the new target
+            
+            if activeHighlight then
+                activeHighlight:Destroy()
+            end
+            activeHighlight = Instance.new("Highlight")
+            activeHighlight.FillColor = Color3.fromRGB(0, 255, 0)
+            activeHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+            activeHighlight.FillTransparency = 0.4
+            activeHighlight.Adornee = currentTargetPart
+            activeHighlight.Parent = currentTargetPart
+        elseif not currentTargetPart then
+            currentTargetPart = bestTarget
+            hasTeleportedToCurrent = false
+            teleportStartTime = nil
+            
+            if activeHighlight then
+                activeHighlight:Destroy()
+            end
+            activeHighlight = Instance.new("Highlight")
+            activeHighlight.FillColor = Color3.fromRGB(0, 255, 0)
+            activeHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+            activeHighlight.FillTransparency = 0.4
+            activeHighlight.Adornee = currentTargetPart
+            activeHighlight.Parent = currentTargetPart
+        end
+    end
+
+    -- 3. Fly towards target continuously, start the 0.15s timer when within 6 studs without stopping, then teleport
+    if currentTargetPart then
+        wasTargetActive = true
+
+        -- Enable noclip and freeze physics so you don't fall
+        enableNoclip()
+        Humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+        local direction = (currentTargetPart.Position - HumanoidRootPart.Position)
+        local distance = direction.Magnitude
+        local flySpeed = Humanoid.WalkSpeed * 2
+
+        if not hasTeleportedToCurrent then
+            -- Keep applying velocity towards the coin continuously (no stopping)
+            HumanoidRootPart.AssemblyLinearVelocity = direction.Unit * flySpeed
+
+            if distance <= 6 then
+                -- Start the timer the exact frame we breach 6 studs
+                if not teleportStartTime then
+                    teleportStartTime = os.clock()
+                end
+
+                -- Execute teleport once the 0.15s timer finishes while flying
+                if os.clock() - teleportStartTime >= 0.15 then
+                    HumanoidRootPart.CFrame = CFrame.new(currentTargetPart.Position) * HumanoidRootPart.CFrame.Rotation
+                    hasTeleportedToCurrent = true
+                end
+            else
+                -- Reset timer if we are pushed back outside 6 studs
+                teleportStartTime = nil
+            end
+        else
+            -- Hold position on the coin until it disappears or becomes invisible
+            HumanoidRootPart.CFrame = CFrame.new(currentTargetPart.Position) * HumanoidRootPart.CFrame.Rotation
+            HumanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+    else
+        -- When no coins are visible or left:
+        if wasTargetActive then
+            wasTargetActive = false
+            disableNoclip()
+            Humanoid:ChangeState(Enum.HumanoidStateType.Running)
+            
+            if activeHighlight then
+                activeHighlight:Destroy()
+                activeHighlight = nil
+            end
+        end
+    end
+end)
